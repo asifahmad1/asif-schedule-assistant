@@ -1,0 +1,22 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdtempSync,rmSync} from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import net from 'node:net';
+import http from 'node:http';
+test('localhost API stores records and rejects cross-origin and invalid-host writes',async t=>{
+  const pick=net.createServer();await new Promise(r=>pick.listen(0,'127.0.0.1',r));const port=pick.address().port;await new Promise(r=>pick.close(r));
+  const dir=mkdtempSync(path.join(os.tmpdir(),'asif-http-'));
+  const child=spawn(process.execPath,['server.mjs'],{env:{...process.env,PORT:String(port),ASIF_DATA_DIR:dir},stdio:['ignore','pipe','pipe']});
+  t.after(async()=>{if(child.exitCode===null){const exited=new Promise(r=>child.once('exit',r));child.kill('SIGTERM');await exited;}rmSync(dir,{recursive:true,force:true});});
+  await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Server did not start')),15000);child.once('exit',()=>{clearTimeout(timer);reject(Error('Server exited'));});child.stdout.on('data',x=>{if(x.toString().includes('Open http')){clearTimeout(timer);resolve();}});});
+  const base=`http://127.0.0.1:${port}`;const state=await (await fetch(base+'/api/state')).json();assert.equal(state.connections.google.connected,false);assert.equal(state.sheet,null);
+  const input={title:'API test meeting',start:'2026-10-15T10:00:00Z',end:'2026-10-15T11:00:00Z'};
+  let r=await fetch(base+'/api/events',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://other.example','X-Asif-Csrf':state.csrf},body:JSON.stringify(input)});assert.equal(r.status,403);
+  r=await fetch(base+'/api/events',{method:'POST',headers:{'Content-Type':'application/json',Origin:base,'X-Asif-Csrf':state.csrf},body:JSON.stringify(input)});assert.equal(r.status,201);
+  const updated=await (await fetch(base+'/api/state')).json();assert.equal(updated.events.length,1);assert.equal(updated.events[0].title,input.title);
+  const badHost=await new Promise((resolve,reject)=>{const request=http.get({hostname:'127.0.0.1',port,path:'/api/state',headers:{Host:'attacker.example'}},response=>{response.resume();resolve(response.statusCode);});request.on('error',reject);});assert.equal(badHost,403);
+  const exportData=await (await fetch(base+'/api/export')).json();assert.equal(exportData.events.length,1);assert.equal(exportData.settings,undefined);
+});
